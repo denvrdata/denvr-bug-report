@@ -3,3 +3,5 @@
 *.log
 out/
 dist/
+denvr-bug-report-*/
+!vendor/**
