@@ -29,7 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)"
 
 # ---------------------------------------------------------------- defaults ---
 OUT_BASE="$(pwd)"
-BUGREPORT_TIMEOUT=900
+BUGREPORT_TIMEOUT=1200
+BUGREPORT_TIMEOUT_SET=0
+THERMAL_TIMEOUT=1200
+THERMAL_TIMEOUT_SET=0
 MAX_EMBED_KB=4096
 SKIP_BUGREPORT=0
 NO_ARCHIVE=0
@@ -68,19 +71,27 @@ Default run: nvidia-smi -q, dmesg -T, nvidia-bug-report.sh
 Options:
   -o, --output-dir DIR        Where to create the report (default: current dir)
       --skip-bugreport        Do not run nvidia-bug-report.sh (faster)
-      --bugreport-timeout S   Timeout for nvidia-bug-report.sh (default: $BUGREPORT_TIMEOUT)
+      --bugreport-timeout S   Timeout for nvidia-bug-report.sh in seconds
+                              (default: $BUGREPORT_TIMEOUT; asked interactively in
+                              minutes if omitted and run from a terminal)
       --max-embed-kb N        Max KB of each raw output embedded in the HTML
                               (default: $MAX_EMBED_KB; full files stay in the archive)
       --no-archive            Do not create the .tar.gz
   -y, --yes                   Do not ask for confirmation (needed for --thermal
-                              when not run from a terminal)
+                              when not run from a terminal); also skips the
+                              interactive timeout prompts and uses the defaults
 
 Thermal test (opt-in, loads the GPUs for roughly 15 min on Hopper / 30 min on
 Blackwell; needs ipmitool and DCGM):
       --thermal               Run the bundled OEM thermal test
       --thermal-platform P    hopper | blackwell (asked interactively if omitted)
       --thermal-script PATH   Use this thermal script instead of the bundled one
+      --thermal-timeout S     Timeout for the thermal test in seconds
+                              (default: $THERMAL_TIMEOUT; asked interactively in
+                              minutes if omitted and run from a terminal)
       --thermal-csv FILE      Do not run the test; analyse an existing thermal CSV
+
+This script must be run as root (sudo); it exits immediately otherwise.
 
   -V, --version               Print version
   -h, --help                  Show this help
@@ -94,13 +105,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o|--output-dir)        need_arg "$1" "${2:-}"; OUT_BASE="$2"; shift 2 ;;
     --skip-bugreport)       SKIP_BUGREPORT=1; shift ;;
-    --bugreport-timeout)    need_arg "$1" "${2:-}"; BUGREPORT_TIMEOUT="$2"; shift 2 ;;
+    --bugreport-timeout)    need_arg "$1" "${2:-}"; BUGREPORT_TIMEOUT="$2"; BUGREPORT_TIMEOUT_SET=1; shift 2 ;;
     --max-embed-kb)         need_arg "$1" "${2:-}"; MAX_EMBED_KB="$2"; shift 2 ;;
     --no-archive)           NO_ARCHIVE=1; shift ;;
     -y|--yes)               ASSUME_YES=1; shift ;;
     --thermal)              DO_THERMAL=1; shift ;;
     --thermal-platform)     need_arg "$1" "${2:-}"; THERMAL_PLATFORM="$2"; shift 2 ;;
     --thermal-script)       need_arg "$1" "${2:-}"; THERMAL_SCRIPT="$2"; shift 2 ;;
+    --thermal-timeout)      need_arg "$1" "${2:-}"; THERMAL_TIMEOUT="$2"; THERMAL_TIMEOUT_SET=1; shift 2 ;;
     --thermal-csv)          need_arg "$1" "${2:-}"; THERMAL_CSV_IN="$2"; shift 2 ;;
     -V|--version)           echo "$VERSION"; exit 0 ;;
     -h|--help)              usage; exit 0 ;;
@@ -109,6 +121,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$BUGREPORT_TIMEOUT" in ''|*[!0-9]*) die "--bugreport-timeout must be a number of seconds" 1 ;; esac
+case "$THERMAL_TIMEOUT"   in ''|*[!0-9]*) die "--thermal-timeout must be a number of seconds" 1 ;; esac
 case "$MAX_EMBED_KB"      in ''|*[!0-9]*) die "--max-embed-kb must be a number" 1 ;; esac
 if [ -n "$THERMAL_PLATFORM" ]; then
   case "$(printf '%s' "$THERMAL_PLATFORM" | tr 'A-Z' 'a-z')" in
@@ -123,6 +136,11 @@ fi
 if [ "$DO_THERMAL" -eq 1 ] && [ -n "$THERMAL_CSV_IN" ]; then
   die "Use either --thermal (run the test) or --thermal-csv (analyse a CSV), not both" 1
 fi
+
+# ------------------------------------------------------------- root check ---
+# dmesg -T and nvidia-bug-report.sh produce incomplete data otherwise, so this
+# is a hard requirement rather than a warning.
+[ "$(id -u 2>/dev/null)" = "0" ] || die "This script must be run as root. Re-run with sudo." 1
 
 # --------------------------------------------------------------- preflight ---
 missing=""
@@ -147,16 +165,12 @@ FINDINGS="$PARSED/findings.tsv"
 : > "$MANIFEST"
 : > "$FINDINGS"
 
-IS_ROOT=0
-[ "$(id -u 2>/dev/null)" = "0" ] && IS_ROOT=1
+IS_ROOT=1   # enforced above; kept so the rest of the script can still check it
 HAVE_SMI=0; have nvidia-smi && HAVE_SMI=1
 RUN_START_HUMAN="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
 log "denvr-bug-report $VERSION on $HOST"
 log "Output: $RUN_DIR"
-if [ "$IS_ROOT" -eq 0 ]; then
-  warn "Not running as root. dmesg -T and nvidia-bug-report.sh may be restricted; re-run with sudo for complete data."
-fi
 if [ "$HAVE_SMI" -eq 0 ]; then
   warn "nvidia-smi not found: the NVIDIA driver may not be installed or loaded. GPU steps will be skipped."
 fi
@@ -177,7 +191,9 @@ record_step() {
 
 # add_finding SEVERITY PAGE SCOPE TITLE DETAIL
 add_finding() {
-  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" | tr -d '\r' >> "$FINDINGS"
+  local sev="$1" page="$2" scope="$3" title="$4" detail="$5"
+  detail="$(printf '%s' "$detail" | tr '\t' ' ')"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$sev" "$page" "$scope" "$title" "$detail" | tr -d '\r' >> "$FINDINGS"
 }
 
 # run_cmd TIMEOUT OUTFILE ERRFILE -- CMD...
@@ -190,6 +206,26 @@ run_cmd() {
     "$@" > "$out" 2> "$err"; rc=$?
   fi
   return "$rc"
+}
+
+# prompt_timeout_minutes LABEL DEFAULT_SECS VARNAME FLAG
+# Asks for a timeout in minutes (easier for a human than seconds) and stores
+# the converted value, in seconds, into VARNAME. No-op when non-interactive
+# or --yes was given: the existing default/CLI value in VARNAME is kept.
+prompt_timeout_minutes() {
+  local label="$1" default_secs="$2" varname="$3" flag="$4" def_min ans ans_read
+  [ "$ASSUME_YES" -eq 1 ] && return 0
+  [ -t 0 ] || { warn "Not a terminal; using default $label timeout (${default_secs}s). Use $flag or -y to silence this."; return 0; }
+  def_min=$(( (default_secs + 59) / 60 ))
+  printf '%s timeout in minutes [default %s]: ' "$label" "$def_min"
+  ans_read=""
+  read -r ans_read
+  ans="${ans_read:-$def_min}"
+  case "$ans" in
+    ''|*[!0-9]*) warn "Invalid number; using default ($def_min min)."; return 0 ;;
+  esac
+  [ "$ans" -gt 0 ] || { warn "Timeout must be greater than 0; using default ($def_min min)."; return 0; }
+  printf -v "$varname" '%s' "$((ans * 60))"
 }
 
 # start_ticker / stop_ticker: print a dot every 30 s during long steps
@@ -328,7 +364,7 @@ collect_thermal() {
   local mins=15; [ "$THERMAL_PLATFORM" = "blackwell" ] && mins=30
   if [ "$ASSUME_YES" -eq 0 ]; then
     if [ -t 0 ]; then
-      printf 'The thermal test runs a GPU stress workload for about %s minutes on %s. Do not run it on a node serving production workloads. Continue? [y/N] ' "$mins" "$HOST"
+      printf 'The thermal test runs a GPU stress workload for about %s minutes on %s (killed after %s min if it has not finished). Do not run it on a node serving production workloads. Continue? [y/N] ' "$mins" "$HOST" "$((THERMAL_TIMEOUT / 60))"
       local yn=""; read -r yn
       case "$yn" in y|Y|yes|YES) ;; *) log "Thermal test cancelled."; record_step "Thermal test" "$script" skipped 0 "" "declined at prompt"; return 0 ;; esac
     else
@@ -337,15 +373,24 @@ collect_thermal() {
     fi
   fi
 
+  have timeout || warn "'timeout' not available: the thermal test will run without a time limit"
   local choice=1; [ "$THERMAL_PLATFORM" = "blackwell" ] && choice=2
   local s=$SECONDS rc
-  log "Running thermal test ($THERMAL_PLATFORM, about $mins min). Progress dots appear every 30 s."
+  log "Running thermal test ($THERMAL_PLATFORM, about $mins min, timeout ${THERMAL_TIMEOUT}s). Progress dots appear every 30 s."
   start_ticker
-  ( cd "$RAW/thermal" && printf '%s\n' "$choice" | bash "$script" > "$RAW/thermal/thermal-run.log" 2>&1 ); rc=$?
+  if [ "$THERMAL_TIMEOUT" -gt 0 ] && have timeout; then
+    ( cd "$RAW/thermal" && printf '%s\n' "$choice" | timeout "$THERMAL_TIMEOUT" bash "$script" > "$RAW/thermal/thermal-run.log" 2>&1 ); rc=$?
+  else
+    ( cd "$RAW/thermal" && printf '%s\n' "$choice" | bash "$script" > "$RAW/thermal/thermal-run.log" 2>&1 ); rc=$?
+  fi
   stop_ticker
   THERMAL_CSV="$(ls -1t "$RAW"/thermal/thermal_results.*.csv 2>/dev/null | head -n1)"
   record_step "Thermal test" "master_thermal_test.sh ($THERMAL_PLATFORM)" "$rc" $((SECONDS - s)) "${THERMAL_CSV:-$RAW/thermal/thermal-run.log}" ""
-  [ "$rc" -eq 0 ] || warn "Thermal script exited with $rc (see raw/thermal/thermal-run.log)"
+  case "$rc" in
+    0)   ;;
+    124) warn "Thermal script timed out after ${THERMAL_TIMEOUT}s (see raw/thermal/thermal-run.log); try --thermal-timeout with a larger value." ;;
+    *)   warn "Thermal script exited with $rc (see raw/thermal/thermal-run.log)" ;;
+  esac
 }
 THERMAL_CSV=""
 
@@ -793,9 +838,6 @@ thermal_summary_html() {
 }
 
 analyze_system() {
-  if [ "$IS_ROOT" -eq 0 ]; then
-    add_finding warn system - "Not run as root" "dmesg -T and nvidia-bug-report.sh may have been restricted; some data may be incomplete. Re-run with sudo."
-  fi
   local failed
   failed="$(awk -F'\t' '$3 == "failed" || $3 == "timeout" { printf "%s (exit %s); ", $1, $4 }' "$MANIFEST")"
   if [ -n "$failed" ]; then
@@ -1060,6 +1102,13 @@ EOF
 }
 
 # -------------------------------------------------------------------- main ---
+if [ "$SKIP_BUGREPORT" -eq 0 ] && [ "$BUGREPORT_TIMEOUT_SET" -eq 0 ]; then
+  prompt_timeout_minutes "nvidia-bug-report.sh" "$BUGREPORT_TIMEOUT" BUGREPORT_TIMEOUT "--bugreport-timeout"
+fi
+if [ "$DO_THERMAL" -eq 1 ] && [ "$THERMAL_TIMEOUT_SET" -eq 0 ]; then
+  prompt_timeout_minutes "Thermal test" "$THERMAL_TIMEOUT" THERMAL_TIMEOUT "--thermal-timeout"
+fi
+
 collect_system
 collect_smi
 collect_dmesg

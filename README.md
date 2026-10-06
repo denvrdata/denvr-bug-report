@@ -22,23 +22,26 @@ Everything is plain bash plus standard tools (`awk`, `sed`, `grep`, `tar`, `gzip
 sudo ./denvr-bug-report.sh                      # default collection
 sudo ./denvr-bug-report.sh --skip-bugreport     # faster, skips nvidia-bug-report.sh
 sudo ./denvr-bug-report.sh --thermal --thermal-platform hopper
-./denvr-bug-report.sh --thermal-csv thermal_results.host.csv   # analyse an existing CSV only
+sudo ./denvr-bug-report.sh --thermal-csv thermal_results.host.csv   # analyse an existing CSV only
 ```
+
+The script must be run as root (`sudo`); it exits immediately otherwise, since `dmesg -T` and `nvidia-bug-report.sh` are unreliable without it.
 
 | Option | Meaning |
 |---|---|
 | `-o, --output-dir DIR` | Where the report folder and archive are created (default: current directory) |
 | `--skip-bugreport` | Do not run `nvidia-bug-report.sh` |
-| `--bugreport-timeout S` | Timeout for `nvidia-bug-report.sh` (default 900) |
+| `--bugreport-timeout S` | Timeout for `nvidia-bug-report.sh` in seconds (default 1200 = 20 min) |
 | `--max-embed-kb N` | Max KB of each raw output embedded in the HTML (default 4096) |
 | `--no-archive` | Do not create the `.tar.gz` |
-| `-y, --yes` | Skip confirmations (required for `--thermal` outside a terminal) |
+| `-y, --yes` | Skip confirmations (required for `--thermal` outside a terminal), and skip the timeout prompts below |
 | `--thermal` | Run the bundled OEM thermal test |
 | `--thermal-platform P` | `hopper` or `blackwell` (asked interactively if omitted) |
 | `--thermal-script PATH` | Use a different thermal script |
+| `--thermal-timeout S` | Timeout for the thermal test in seconds (default 1200 = 20 min) |
 | `--thermal-csv FILE` | Analyse a thermal CSV without running the test |
 
-Run as root for complete data: `dmesg -T` and `nvidia-bug-report.sh` can be restricted otherwise.
+If `--bugreport-timeout` / `--thermal-timeout` are not given and the script is run from a terminal, it asks for each timeout interactively, in minutes (converted to seconds internally); the defaults above are offered and accepted on an empty reply. Pass `-y`/`--yes`, or the flags above, to run non-interactively.
 
 ## Output
 
