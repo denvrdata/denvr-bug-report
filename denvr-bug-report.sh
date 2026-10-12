@@ -329,6 +329,7 @@ collect_thermal() {
     return 0
   fi
   if [ "$HAVE_SMI" -eq 0 ]; then
+    warn "nvidia-smi not found; skipping the thermal test."
     record_step "Thermal test" "$script" skipped 0 "" "nvidia-smi not found"; return 0
   fi
 
@@ -1102,10 +1103,11 @@ EOF
 }
 
 # -------------------------------------------------------------------- main ---
-if [ "$SKIP_BUGREPORT" -eq 0 ] && [ "$BUGREPORT_TIMEOUT_SET" -eq 0 ]; then
+# Both steps are skipped without nvidia-smi, so do not ask for their timeouts.
+if [ "$HAVE_SMI" -eq 1 ] && [ "$SKIP_BUGREPORT" -eq 0 ] && [ "$BUGREPORT_TIMEOUT_SET" -eq 0 ]; then
   prompt_timeout_minutes "nvidia-bug-report.sh" "$BUGREPORT_TIMEOUT" BUGREPORT_TIMEOUT "--bugreport-timeout"
 fi
-if [ "$DO_THERMAL" -eq 1 ] && [ "$THERMAL_TIMEOUT_SET" -eq 0 ]; then
+if [ "$HAVE_SMI" -eq 1 ] && [ "$DO_THERMAL" -eq 1 ] && [ "$THERMAL_TIMEOUT_SET" -eq 0 ]; then
   prompt_timeout_minutes "Thermal test" "$THERMAL_TIMEOUT" THERMAL_TIMEOUT "--thermal-timeout"
 fi
 
