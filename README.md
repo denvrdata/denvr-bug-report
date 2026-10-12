@@ -16,6 +16,22 @@ Opt-in (`--thermal`): the OEM Master GPU Thermal Script under `vendor/`. It is a
 
 Everything is plain bash plus standard tools (`awk`, `sed`, `grep`, `tar`, `gzip`). No Python, no network, no external assets.
 
+## Quick install and run
+
+Download the latest release, check its checksum, and run it in one step:
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -
+```
+
+Anything after `-s --` is passed to the script, for example:
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -- --skip-bugreport -y
+```
+
+The report is written to the current directory, and the downloaded copy is deleted afterwards. Prompts still work when the installer is piped, because it reads them from the terminal. To pin a version, set `DBR_VERSION` on the `sh` side of the pipe: `... | sudo DBR_VERSION=v0.1.0 sh -s -`. `DBR_BASE_URL` points it at a mirror instead of GitHub.
+
 ## Usage
 
 ```bash
@@ -70,6 +86,14 @@ The report embeds hostnames, GPU serial numbers and kernel log lines. There is n
 ```bash
 bash -n denvr-bug-report.sh
 shellcheck -s bash denvr-bug-report.sh
+shellcheck -s sh install.sh
 ```
 
-Planned: release workflow (GitHub Releases), optional `--redact`, tuning of findings after live-node runs.
+### Releasing
+
+1. Bump `VERSION` in `denvr-bug-report.sh` and commit.
+2. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+
+`.github/workflows/release.yml` fails if the tag and `VERSION` differ. It then lints, builds `denvr-bug-report.tar.gz` (script, README, `vendor/`), smoke-tests `install.sh` against it, and publishes the tarball, `install.sh` and `sha256sums.txt` as a GitHub Release. Releases must not be marked as pre-releases, because `/releases/latest/download/` skips them.
+
+Planned: optional `--redact`, tuning of findings after live-node runs.

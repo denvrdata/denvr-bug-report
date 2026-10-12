@@ -1,0 +1,53 @@
+name: release
+
+# Push a tag matching the VERSION in denvr-bug-report.sh, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check VERSION matches tag
+        run: |
+          v="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' denvr-bug-report.sh)"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::VERSION=\"$v\" in denvr-bug-report.sh does not match tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Lint
+        run: |
+          bash -n denvr-bug-report.sh
+          sh -n install.sh
+          shellcheck -s bash -S error denvr-bug-report.sh
+          shellcheck -s sh -S error install.sh
+
+      - name: Build assets
+        run: |
+          mkdir -p dist/denvr-bug-report
+          cp denvr-bug-report.sh README.md dist/denvr-bug-report/
+          cp -R vendor dist/denvr-bug-report/
+          tar -C dist --owner=0 --group=0 -czf dist/denvr-bug-report.tar.gz denvr-bug-report
+          cp install.sh dist/
+          (cd dist && sha256sum denvr-bug-report.tar.gz install.sh > sha256sums.txt)
+          cat dist/sha256sums.txt
+
+      - name: Smoke-test installer against built assets
+        run: DBR_BASE_URL="file://$PWD/dist" sh dist/install.sh --version
+
+      # Not marked as a prerelease: /releases/latest/download/ skips prereleases.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/denvr-bug-report.tar.gz dist/install.sh dist/sha256sums.txt \
+            --title "$GITHUB_REF_NAME" --generate-notes
