@@ -4,6 +4,36 @@ Collects the diagnostics Denvr Support needs for bare-metal GPU issues and build
 
 > Status: v0.1.0, not yet validated on a live GPU node. Parsers were written from the documented output formats and smoke-tested only against hand-made mock data. Expect to iterate after the first real runs.
 
+## Quick start
+
+Run on the GPU node. The installer downloads the latest release, checks its SHA-256 checksum, runs the collector, and then deletes the downloaded copy. The report and `.tar.gz` are written to the current directory.
+
+With the thermal test (prompts for platform, timeouts and confirmation):
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -- --thermal
+```
+
+Platform given up front (`hopper` or `blackwell`):
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -- --thermal --thermal-platform hopper
+```
+
+Fully unattended (no prompts; timeouts in seconds):
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -- --thermal --thermal-platform hopper -y --bugreport-timeout 1200 --thermal-timeout 1800
+```
+
+Pinned to a specific release instead of the latest:
+
+```bash
+curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/download/v0.1.0/install.sh | sudo DBR_VERSION=v0.1.0 sh -s -- --thermal
+```
+
+Without the thermal test: `... | sudo sh -s -`. Anything after `-s --` is passed to the script (see [Usage](#usage)). Prompts work even though the installer is piped, because it reads them from the terminal. `DBR_BASE_URL` points the installer at a mirror instead of GitHub.
+
 ## What it does
 
 Default run:
@@ -15,22 +45,6 @@ Default run:
 Opt-in (`--thermal`): the OEM Master GPU Thermal Script under `vendor/`. It is a stress test (about 15 min on Hopper, 30 min on Blackwell) and needs `ipmitool` and DCGM, so it never runs by default.
 
 Everything is plain bash plus standard tools (`awk`, `sed`, `grep`, `tar`, `gzip`). No Python, no network, no external assets.
-
-## Quick install and run
-
-Download the latest release, check its checksum, and run it in one step:
-
-```bash
-curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -
-```
-
-Anything after `-s --` is passed to the script, for example:
-
-```bash
-curl -sfL https://github.com/denvrdata/denvr-bug-report/releases/latest/download/install.sh | sudo sh -s -- --skip-bugreport -y
-```
-
-The report is written to the current directory, and the downloaded copy is deleted afterwards. Prompts still work when the installer is piped, because it reads them from the terminal. To pin a version, set `DBR_VERSION` on the `sh` side of the pipe: `... | sudo DBR_VERSION=v0.1.0 sh -s -`. `DBR_BASE_URL` points it at a mirror instead of GitHub.
 
 ## Usage
 
