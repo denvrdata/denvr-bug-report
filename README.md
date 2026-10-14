@@ -2,7 +2,7 @@
 
 Collects the diagnostics Denvr Support needs for bare-metal GPU issues and builds a single offline HTML report plus a `.tar.gz` that can be attached to a support ticket.
 
-> Status: v0.1.1, not yet validated on a live GPU node. Parsers were written from the documented output formats and smoke-tested only against hand-made mock data. Expect to iterate after the first real runs.
+> Status: v0.1.1, Parsers were written from the documented output formats and smoke-tested only against hand-made mock data. Expect to iterate after the first real runs.
 
 ## Quick start
 
