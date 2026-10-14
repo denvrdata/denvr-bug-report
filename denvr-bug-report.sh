@@ -13,8 +13,10 @@
 # Opt-in (--thermal):
 #   4. OEM Master GPU Thermal Script (GPU stress test, 15-30 min)
 #
-# Requirements: bash 4+, coreutils, awk, sed, grep, tar, gzip. No network, no
-# Python. Run as root (sudo) for complete data.
+# Requirements: bash 4+, coreutils (incl. timeout), awk, sed, grep, tar, gzip,
+# dmesg, and the NVIDIA driver (nvidia-smi, nvidia-bug-report.sh). --thermal
+# also needs ipmitool, sudo and DCGM. All are checked before anything runs and
+# the script exits if one is missing. No network, no Python. Must run as root.
 #
 # Findings are indicators derived from simple pattern checks. They are not a
 # diagnosis; confirm against NVIDIA/OEM documentation.
@@ -23,7 +25,7 @@
 set -u
 export LC_ALL=C
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)"
 
@@ -91,7 +93,8 @@ Blackwell; needs ipmitool and DCGM):
                               minutes if omitted and run from a terminal)
       --thermal-csv FILE      Do not run the test; analyse an existing thermal CSV
 
-This script must be run as root (sudo); it exits immediately otherwise.
+This script must be run as root (sudo); it exits immediately otherwise. It
+also exits before running anything if a required tool is missing (exit 2).
 
   -V, --version               Print version
   -h, --help                  Show this help
@@ -143,11 +146,64 @@ fi
 [ "$(id -u 2>/dev/null)" = "0" ] || die "This script must be run as root. Re-run with sudo." 1
 
 # --------------------------------------------------------------- preflight ---
+# Every dependency of the requested run is checked here, so a run either has
+# everything it needs or stops before touching the GPUs or writing anything.
+
+# The thermal prerequisites depend on the platform, so settle it first.
+if [ "$DO_THERMAL" -eq 1 ] && [ -z "$THERMAL_PLATFORM" ]; then
+  if [ -t 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
+    printf 'Thermal test platform: 1) Hopper (H100/H200)  2) Blackwell (B200) [1-2]: '
+    ans=""; read -r ans
+    case "$ans" in 1) THERMAL_PLATFORM=hopper ;; 2) THERMAL_PLATFORM=blackwell ;; esac
+  fi
+  [ -n "$THERMAL_PLATFORM" ] || die "--thermal needs a platform: add --thermal-platform hopper|blackwell" 1
+fi
+if [ "$DO_THERMAL" -eq 1 ] && [ -z "$THERMAL_SCRIPT" ]; then
+  for c in "$SCRIPT_DIR/vendor/Master_GPU_Thermal_Script/master_thermal_test.sh" "$SCRIPT_DIR/master_thermal_test.sh"; do
+    [ -r "$c" ] && { THERMAL_SCRIPT="$c"; break; }
+  done
+fi
+
 missing=""
-for t in awk sed grep tar gzip tr head tail wc sort date hostname uname; do
-  have "$t" || missing="$missing $t"
+need() { have "$1" || missing="$missing $1"; }
+for t in awk sed grep tar gzip tr head tail wc sort date hostname uname timeout dmesg nvidia-smi; do
+  need "$t"
 done
-[ -z "$missing" ] || die "Required tools missing:$missing" 2
+[ "$SKIP_BUGREPORT" -eq 1 ] || need nvidia-bug-report.sh
+if [ "$DO_THERMAL" -eq 1 ]; then
+  need ipmitool
+  need sudo   # the OEM script calls 'sudo ipmitool' even when run as root
+  if [ "$THERMAL_PLATFORM" = "hopper" ]; then
+    { have dcgmproftester12 || have dcgmproftester13; } || missing="$missing dcgmproftester12/13"
+  else
+    need dcgmi
+  fi
+  if [ -z "$THERMAL_SCRIPT" ] || [ ! -r "$THERMAL_SCRIPT" ]; then
+    missing="$missing master_thermal_test.sh"
+  fi
+fi
+
+if [ -n "$missing" ]; then
+  printf 'ERROR: Required tools missing:%s\n' "$missing" >&2
+  for t in $missing; do
+    case "$t" in
+      nvidia-smi|nvidia-bug-report.sh)
+        printf '  %-22s install the NVIDIA driver\n' "$t" >&2 ;;
+      ipmitool)
+        printf '  %-22s sudo apt install ipmitool\n' "$t" >&2 ;;
+      dcgmi|dcgmproftester12/13)
+        printf '  %-22s install NVIDIA DCGM (datacenter-gpu-manager)\n' "$t" >&2 ;;
+      master_thermal_test.sh)
+        printf '  %-22s not found under vendor/; pass --thermal-script PATH\n' "$t" >&2 ;;
+      *)
+        printf '  %-22s install it with your package manager\n' "$t" >&2 ;;
+    esac
+  done
+  case "$missing" in
+    *nvidia-bug-report.sh*) printf 'To run without nvidia-bug-report.sh, add --skip-bugreport.\n' >&2 ;;
+  esac
+  exit 2
+fi
 
 mkdir -p "$OUT_BASE" 2>/dev/null || die "Cannot create output directory: $OUT_BASE" 2
 OUT_BASE="$(cd "$OUT_BASE" && pwd)"
@@ -165,15 +221,10 @@ FINDINGS="$PARSED/findings.tsv"
 : > "$MANIFEST"
 : > "$FINDINGS"
 
-IS_ROOT=1   # enforced above; kept so the rest of the script can still check it
-HAVE_SMI=0; have nvidia-smi && HAVE_SMI=1
 RUN_START_HUMAN="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
 log "denvr-bug-report $VERSION on $HOST"
 log "Output: $RUN_DIR"
-if [ "$HAVE_SMI" -eq 0 ]; then
-  warn "nvidia-smi not found: the NVIDIA driver may not be installed or loaded. GPU steps will be skipped."
-fi
 
 # ------------------------------------------------------------- step runner ---
 # record_step NAME COMMAND RC SECONDS FILE NOTE
@@ -200,7 +251,7 @@ add_finding() {
 run_cmd() {
   local to="$1" out="$2" err="$3" rc
   shift 4
-  if [ "$to" -gt 0 ] && have timeout; then
+  if [ "$to" -gt 0 ]; then
     timeout "$to" "$@" > "$out" 2> "$err"; rc=$?
   else
     "$@" > "$out" 2> "$err"; rc=$?
@@ -261,7 +312,6 @@ collect_system() {
 }
 
 collect_smi() {
-  [ "$HAVE_SMI" -eq 1 ] || { record_step "nvidia-smi -q" "nvidia-smi -q" skipped 0 "" "nvidia-smi not found"; return; }
   log "Running nvidia-smi -q"
   local s=$SECONDS rc
   run_cmd 180 "$RAW/nvidia-smi-q.txt" "$RAW/nvidia-smi-q.stderr" -- nvidia-smi -q; rc=$?
@@ -273,9 +323,6 @@ collect_smi() {
 }
 
 collect_dmesg() {
-  if ! have dmesg; then
-    record_step "dmesg -T" "dmesg -T" skipped 0 "" "dmesg not found"; return
-  fi
   log "Running dmesg -T"
   local s=$SECONDS rc
   run_cmd 60 "$RAW/dmesg-T.txt" "$RAW/dmesg-T.stderr" -- dmesg -T; rc=$?
@@ -287,12 +334,8 @@ collect_bugreport() {
   if [ "$SKIP_BUGREPORT" -eq 1 ]; then
     record_step "nvidia-bug-report.sh" "nvidia-bug-report.sh" skipped 0 "" "skipped by --skip-bugreport"; return
   fi
-  if ! have nvidia-bug-report.sh; then
-    record_step "nvidia-bug-report.sh" "nvidia-bug-report.sh" skipped 0 "" "nvidia-bug-report.sh not found in PATH"; return
-  fi
   local out="$RAW/nvidia-bug-report.log.gz" s=$SECONDS rc
   log "Running nvidia-bug-report.sh (timeout ${BUGREPORT_TIMEOUT}s; this can take several minutes)"
-  have timeout || warn "'timeout' not available: nvidia-bug-report.sh will run without a time limit"
   start_ticker
   ( cd "$RAW" && run_cmd "$BUGREPORT_TIMEOUT" "$RAW/nvidia-bug-report.stdout" "$RAW/nvidia-bug-report.stderr" -- \
       nvidia-bug-report.sh --output-file "$out" ); rc=$?
@@ -317,51 +360,8 @@ collect_thermal() {
     return 0
   fi
 
+  # Script, platform and prerequisites were all resolved in the preflight.
   local script="$THERMAL_SCRIPT"
-  if [ -z "$script" ]; then
-    for c in "$SCRIPT_DIR/vendor/Master_GPU_Thermal_Script/master_thermal_test.sh" "$SCRIPT_DIR/master_thermal_test.sh"; do
-      [ -r "$c" ] && { script="$c"; break; }
-    done
-  fi
-  if [ -z "$script" ] || [ ! -r "$script" ]; then
-    warn "Thermal script not found. Use --thermal-script PATH or place it under vendor/."
-    record_step "Thermal test" "master_thermal_test.sh" skipped 0 "" "thermal script not found"
-    return 0
-  fi
-  if [ "$HAVE_SMI" -eq 0 ]; then
-    warn "nvidia-smi not found; skipping the thermal test."
-    record_step "Thermal test" "$script" skipped 0 "" "nvidia-smi not found"; return 0
-  fi
-
-  # Platform selection
-  if [ -z "$THERMAL_PLATFORM" ]; then
-    if [ -t 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
-      local ans=""
-      printf 'Thermal test platform: 1) Hopper (H100/H200)  2) Blackwell (B200) [1-2]: '
-      read -r ans
-      case "$ans" in 1) THERMAL_PLATFORM=hopper ;; 2) THERMAL_PLATFORM=blackwell ;; esac
-    fi
-    if [ -z "$THERMAL_PLATFORM" ]; then
-      warn "No valid --thermal-platform given; skipping the thermal test."
-      record_step "Thermal test" "$script" skipped 0 "" "platform not specified"; return 0
-    fi
-  fi
-
-  # Prerequisites (the OEM script checks these too; failing early is clearer)
-  local pre_missing=""
-  have ipmitool || pre_missing="$pre_missing ipmitool"
-  if [ "$IS_ROOT" -eq 0 ] && ! have sudo; then pre_missing="$pre_missing sudo"; fi
-  if [ "$THERMAL_PLATFORM" = "hopper" ]; then
-    { have dcgmproftester12 || have dcgmproftester13; } || pre_missing="$pre_missing dcgmproftester12/13"
-  else
-    have dcgmi || pre_missing="$pre_missing dcgmi"
-  fi
-  if [ -n "$pre_missing" ]; then
-    warn "Thermal test prerequisites missing:$pre_missing (see the thermal script README). Skipping."
-    record_step "Thermal test" "$script" skipped 0 "" "missing:$pre_missing"; return 0
-  fi
-
-  have sudo || warn "'sudo' not found: the OEM script calls 'sudo ipmitool', so the BMC inlet temperature column may be empty."
   local mins=15; [ "$THERMAL_PLATFORM" = "blackwell" ] && mins=30
   if [ "$ASSUME_YES" -eq 0 ]; then
     if [ -t 0 ]; then
@@ -374,12 +374,11 @@ collect_thermal() {
     fi
   fi
 
-  have timeout || warn "'timeout' not available: the thermal test will run without a time limit"
   local choice=1; [ "$THERMAL_PLATFORM" = "blackwell" ] && choice=2
   local s=$SECONDS rc
   log "Running thermal test ($THERMAL_PLATFORM, about $mins min, timeout ${THERMAL_TIMEOUT}s). Progress dots appear every 30 s."
   start_ticker
-  if [ "$THERMAL_TIMEOUT" -gt 0 ] && have timeout; then
+  if [ "$THERMAL_TIMEOUT" -gt 0 ]; then
     ( cd "$RAW/thermal" && printf '%s\n' "$choice" | timeout "$THERMAL_TIMEOUT" bash "$script" > "$RAW/thermal/thermal-run.log" 2>&1 ); rc=$?
   else
     ( cd "$RAW/thermal" && printf '%s\n' "$choice" | bash "$script" > "$RAW/thermal/thermal-run.log" 2>&1 ); rc=$?
@@ -699,10 +698,6 @@ analyze_bugreport() {
   local f="$BUGREPORT_FILE"
   if [ "$SKIP_BUGREPORT" -eq 1 ]; then
     add_finding info bugreport - "nvidia-bug-report.sh was skipped" "Skipped with --skip-bugreport."
-    return
-  fi
-  if ! have nvidia-bug-report.sh; then
-    add_finding warn bugreport - "nvidia-bug-report.sh not found" "Not found in PATH. It ships with the NVIDIA driver; support may need to ask for it separately."
     return
   fi
   if [ -z "$f" ] || [ ! -s "$f" ]; then
@@ -1103,11 +1098,10 @@ EOF
 }
 
 # -------------------------------------------------------------------- main ---
-# Both steps are skipped without nvidia-smi, so do not ask for their timeouts.
-if [ "$HAVE_SMI" -eq 1 ] && [ "$SKIP_BUGREPORT" -eq 0 ] && [ "$BUGREPORT_TIMEOUT_SET" -eq 0 ]; then
+if [ "$SKIP_BUGREPORT" -eq 0 ] && [ "$BUGREPORT_TIMEOUT_SET" -eq 0 ]; then
   prompt_timeout_minutes "nvidia-bug-report.sh" "$BUGREPORT_TIMEOUT" BUGREPORT_TIMEOUT "--bugreport-timeout"
 fi
-if [ "$HAVE_SMI" -eq 1 ] && [ "$DO_THERMAL" -eq 1 ] && [ "$THERMAL_TIMEOUT_SET" -eq 0 ]; then
+if [ "$DO_THERMAL" -eq 1 ] && [ "$THERMAL_TIMEOUT_SET" -eq 0 ]; then
   prompt_timeout_minutes "Thermal test" "$THERMAL_TIMEOUT" THERMAL_TIMEOUT "--thermal-timeout"
 fi
 

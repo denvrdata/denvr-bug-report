@@ -2,7 +2,7 @@
 
 Collects the diagnostics Denvr Support needs for bare-metal GPU issues and builds a single offline HTML report plus a `.tar.gz` that can be attached to a support ticket.
 
-> Status: v0.1.0, not yet validated on a live GPU node. Parsers were written from the documented output formats and smoke-tested only against hand-made mock data. Expect to iterate after the first real runs.
+> Status: v0.1.1, not yet validated on a live GPU node. Parsers were written from the documented output formats and smoke-tested only against hand-made mock data. Expect to iterate after the first real runs.
 
 ## Quick start
 
@@ -56,6 +56,14 @@ sudo ./denvr-bug-report.sh --thermal-csv thermal_results.host.csv   # analyse an
 ```
 
 The script must be run as root (`sudo`); it exits immediately otherwise, since `dmesg -T` and `nvidia-bug-report.sh` are unreliable without it.
+
+Before running anything it checks every tool the requested run needs and exits with code 2, listing what is missing and how to install it, if any are absent:
+
+- Always: `timeout`, `dmesg`, `nvidia-smi`, and the standard tools above
+- Unless `--skip-bugreport`: `nvidia-bug-report.sh`
+- With `--thermal`: `ipmitool`, `sudo`, the thermal script, and DCGM (`dcgmproftester12`/`13` on Hopper, `dcgmi` on Blackwell)
+
+With `--thermal` and no `--thermal-platform`, the platform is asked before this check, because the DCGM requirement depends on it; without a terminal (or with `-y`) a missing platform is an error.
 
 | Option | Meaning |
 |---|---|
